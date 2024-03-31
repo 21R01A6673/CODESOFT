@@ -1,0 +1,91 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.applications import VGG16
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, LSTM, Embedding, Dropout
+from tensorflow.keras.callbacks import ModelCheckpoint
+from nltk.translate.bleu_score import corpus_bleu
+import os
+
+def extract_image_features(image_path):
+    model = VGG16(include_top=False, weights='imagenet')
+    model = Model(inputs=model.inputs, outputs=model.layers[-1].output)
+    image = load_img(image_path, target_size=(224, 224))
+    image = img_to_array(image)
+    image = image.reshape((1, image.shape[0], image.shape[1], image.shape[2]))
+    image = tf.keras.applications.vgg16.preprocess_input(image)
+    features = model.predict(image, verbose=0)
+    return features
+
+def load_captions(filename):
+    file = open(filename, 'r')
+    captions = file.readlines()
+    file.close()
+    return captions
+
+def preprocess_captions(captions):
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(captions)
+    vocab_size = len(tokenizer.word_index) + 1
+    sequences = tokenizer.texts_to_sequences(captions)
+    max_length = max(len(seq) for seq in sequences)
+    sequences = pad_sequences(sequences, maxlen=max_length, padding='post')
+    return sequences, vocab_size, max_length, tokenizer
+
+def define_model(vocab_size, max_length):
+    inputs1 = Input(shape=(4096,))
+    fe1 = Dropout(0.5)(inputs1)
+    fe2 = Dense(256, activation='relu')(fe1)
+    inputs2 = Input(shape=(max_length,))
+    se1 = Embedding(vocab_size, 256, mask_zero=True)(inputs2)
+    se2 = Dropout(0.5)(se1)
+    se3 = LSTM(256)(se2)
+    decoder1 = tf.keras.layers.add([fe2, se3])
+    decoder2 = Dense(256, activation='relu')(decoder1)
+    outputs = Dense(vocab_size, activation='softmax')(decoder2)
+    model = Model(inputs=[inputs1, inputs2], outputs=outputs)
+    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    print(model.summary())
+    return model
+
+def data_generator(image_captions, image_features, tokenizer, max_length, vocab_size, batch_size):
+    while 1:
+        for i in range(0, len(image_captions), batch_size):
+            X_images, X_captions, y = [], [], []
+            for j in range(i, min(len(image_captions), i+batch_size)):
+                image_caption = image_captions[j]
+                image_id, caption = image_caption.split('\t')
+                caption_seq = tokenizer.texts_to_sequences([caption])[0]
+                for k in range(1, len(caption_seq)):
+                    in_caption, out_caption = caption_seq[:k], caption_seq[k]
+                    in_caption = pad_sequences([in_caption], maxlen=max_length)[0]
+                    out_caption = to_categorical([out_caption], num_classes=vocab_size)[0]
+                    X_images.append(image_features[image_id])
+                    X_captions.append(in_caption)
+                    y.append(out_caption)
+            yield [[np.array(X_images), np.array(X_captions)], np.array(y)]
+
+image_features = {}
+for filename in os.listdir('features'):
+    image_id = filename.split('.')[0]
+    image_features[image_id] = np.load('features/' + filename)
+
+captions = load_captions('captions.txt')
+sequences, vocab_size, max_length, tokenizer = preprocess_captions(captions)
+model = define_model(vocab_size, max_length)
+split_index = int(0.8 * len(sequences))
+train_sequences, test_sequences = sequences[:split_index], sequences[split_index:]
+train_image_captions, test_image_captions = captions[:split_index], captions[split_index:]
+batch_size = 64
+train_steps = len(train_sequences) // batch_size
+test_steps = len(test_sequences) // batch_size
+generator = data_generator(train_image_captions, image_features, tokenizer, max_length, vocab_size, batch_size)
+checkpoint = ModelCheckpoint('model.h5', monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+model.fit(generator, epochs=20, steps_per_epoch=train_steps, validation_data=(test_generator, test_steps), validation_steps=test_steps, callbacks=[checkpoint])
+tokenizer_json = tokenizer.to_json()
+with open('tokenizer.json', 'w') as json_file:
+    json_file.write(tokenizer_json)
