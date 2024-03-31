@@ -1,0 +1,24 @@
+from surprise import Dataset, Reader, KNNBasic
+from surprise.model_selection import train_test_split
+from surprise import accuracy
+
+reader = Reader(line_format='user item rating', sep=',', rating_scale=(1, 5))
+data = Dataset.load_from_file('data.csv', reader)
+trainset, testset = train_test_split(data, test_size=0.2)
+sim_options = {'name': 'cosine', 'user_based': False}  # item-based collaborative filtering
+model = KNNBasic(sim_options=sim_options)
+model.fit(trainset)
+predictions = model.test(testset)
+accuracy.rmse(predictions)
+
+def get_top_n_recommendations(user_id, n=10):
+    user_items = set(trainset.ur[user_id])
+    all_items = set(trainset.all_items())
+    recommended_items = all_items - user_items
+    predictions = [(item, model.predict(user_id, item).est) for item in recommended_items]
+    top_n = sorted(predictions, key=lambda x: x[1], reverse=True)[:n]
+    return top_n
+#Example
+user_id = 1
+top_recommendations = get_top_n_recommendations(user_id)
+print("Top 10 recommendations for user", user_id, ":", top_recommendations)
